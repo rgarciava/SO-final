@@ -3,6 +3,45 @@
 #include <QVBoxLayout>
 #include <QMessageBox>
 #include <QRandomGenerator>
+#include <QThread>
+#include <iostream>
+#include <pthread.h>
+using namespace std;
+
+
+struct ThreadData {
+    SeatManager *manager;
+    int seatId;
+    int ownerId;
+};
+
+
+void* pthreadWorker(void* arg) {
+    ThreadData* data = static_cast<ThreadData*>(arg);
+    SeatManager* manager = data->manager;
+    int seatId = data->seatId;
+    int ownerId = data->ownerId;
+
+    bool locked = manager->tryLockSeat(seatId, ownerId);
+    if (locked) {
+
+        QThread::msleep(500 + QRandomGenerator::global()->bounded(800));
+        bool confirmed = manager->confirmPurchase(seatId, ownerId);
+        if (confirmed) {
+            printf("[Hilo %lu] Asiento %d comprado con exito.\n",
+                   (unsigned long)pthread_self(), seatId);
+        } else {
+            printf("[Hilo %lu] Asiento %d no pudo confirmarse.\n",
+                   (unsigned long)pthread_self(), seatId);
+        }
+    } else {
+        printf("[Hilo %lu] Fallo al intentar comprar asiento %d (ocupado o vendido).\n",
+               (unsigned long)pthread_self(), seatId);
+    }
+    delete data;
+    return nullptr;
+}
+
 
 MainWindow::MainWindow(int rows, int cols, QWidget *parent)
     : QMainWindow(parent),
@@ -10,6 +49,7 @@ MainWindow::MainWindow(int rows, int cols, QWidget *parent)
     grid(new QGridLayout()),
     btnBuy(new QPushButton("Comprar", this)),
     btnSimulate(new QPushButton("Simular comprador externo", this)),
+    btnPthreadSim(new QPushButton("Simular con pthreads", this)),
     lblSelected(new QLabel("Asiento seleccionado: ninguno", this)),
     m_manager(new SeatManager(rows*cols, this)),
     m_selectedSeat(-1),
@@ -26,6 +66,7 @@ MainWindow::MainWindow(int rows, int cols, QWidget *parent)
     hl->addWidget(lblSelected);
     hl->addStretch();
     hl->addWidget(btnSimulate);
+    hl->addWidget(btnPthreadSim);
     hl->addWidget(btnBuy);
     vlay->addLayout(hl);
 
@@ -33,11 +74,13 @@ MainWindow::MainWindow(int rows, int cols, QWidget *parent)
 
     connect(btnBuy, &QPushButton::clicked, this, &MainWindow::onBuyClicked);
     connect(btnSimulate, &QPushButton::clicked, this, &MainWindow::onSimulateExternalBuyer);
+    connect(btnPthreadSim, &QPushButton::clicked, this, &MainWindow::simulatePthreadBuyers);
     connect(m_manager, &SeatManager::seatStateChanged, this, &MainWindow::handleSeatStateChanged);
 
-    setWindowTitle("Seleccionar asientos - Demo");
-    resize(900, 600);
+    setWindowTitle("Simulador de Cine con Exclusion Mutua");
+    resize(950, 600);
 }
+
 
 MainWindow::~MainWindow()
 {
@@ -48,6 +91,7 @@ MainWindow::~MainWindow()
     }
 }
 
+
 void MainWindow::createSeats(int rows, int cols)
 {
     int id = 1;
@@ -57,13 +101,33 @@ void MainWindow::createSeats(int rows, int cols)
             m_buttons.insert(id, btn);
             grid->addWidget(btn, r, c);
             connect(btn, &SeatButton::clickedSeat, this, &MainWindow::onSeatClicked);
-            // init state from manager
             SeatManager::State s = m_manager->querySeatState(id);
             btn->setState(static_cast<SeatButton::State>(s));
             id++;
         }
     }
 }
+
+
+void MainWindow::simulatePthreadBuyers()
+{
+    const int numThreads = 20;
+    pthread_t threads[numThreads];
+
+    for (int i = 0; i < numThreads; ++i) {
+        int seat = 1 + QRandomGenerator::global()->bounded(m_buttons.size());
+        ThreadData* data = new ThreadData{ m_manager, seat, 1000 + i };
+        pthread_create(&threads[i], nullptr, pthreadWorker, data);
+        printf("Creado hilo %lu intentando asiento %d\n", (unsigned long)threads[i], seat);
+    }
+
+    for (int i = 0; i < numThreads; ++i) {
+        pthread_join(threads[i], nullptr);
+    }
+
+    printf(">>> Todos los hilos terminaron.\n");
+}
+
 
 void MainWindow::onSeatClicked(int seatId)
 {
@@ -78,34 +142,28 @@ void MainWindow::onBuyClicked()
         return;
     }
 
-    // Intentar bloquear lógicamente el asiento para este UI (m_uiOwnerId)
     bool ok = m_manager->tryLockSeat(m_selectedSeat, m_uiOwnerId);
     if (!ok) {
-        // no se pudo bloquear -> otro usuario lo está reservando o ya vendido
         SeatManager::State st = m_manager->querySeatState(m_selectedSeat);
         if (st == SeatManager::Sold)
             QMessageBox::warning(this, "No disponible", "El asiento ya fue vendido.");
         else
-            QMessageBox::information(this, "Ocupado", "Otro usuario está intentando comprar ese asiento. Intenta otro.");
+            QMessageBox::information(this, "Ocupado", "Otro usuario está intentando comprar ese asiento.");
         return;
     }
 
-    // Abre diálogo de confirmación
     PurchaseDialog dlg(m_selectedSeat, this);
     connect(&dlg, &PurchaseDialog::acceptedPurchase, [this]() {
         bool conf = m_manager->confirmPurchase(m_selectedSeat, m_uiOwnerId);
-        if (conf) {
+        if (conf)
             QMessageBox::information(this, "Compra exitosa", QString("Has comprado el asiento %1").arg(m_selectedSeat));
-        } else {
-            QMessageBox::warning(this, "Error", "No se pudo confirmar la compra (estado cambió).");
-        }
+        else
+            QMessageBox::warning(this, "Error", "No se pudo confirmar la compra.");
     });
     connect(&dlg, &PurchaseDialog::canceledPurchase, [this]() {
-        // liberar el lock
         m_manager->releaseLock(m_selectedSeat, m_uiOwnerId);
     });
 
-    // Ejecutar diálogo (bloqueante)
     dlg.exec();
 }
 
@@ -131,14 +189,8 @@ void MainWindow::onSimulateExternalBuyer()
         return;
     }
 
-    // crear un worker con ownerId distinto
     int ownerId = 1000 + m_workers.size() + 1;
     ReservationWorker *w = new ReservationWorker(m_manager, ownerId, m_selectedSeat, this);
     m_workers.append(w);
-    connect(w, &QThread::finished, [w]() {
-        // se podría notificar algo aquí
-    });
     w->start();
-
-    QMessageBox::information(this, "Simulación", "Comprador externo simulado: intentará reservar el asiento seleccionado.");
 }

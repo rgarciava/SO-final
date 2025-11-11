@@ -2,12 +2,16 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
-#include <QGridLayout>
-#include <QLabel>
 #include <QMap>
+#include <QGridLayout>
+#include <QPushButton>
+#include <QLabel>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
 #include "SeatButton.h"
 #include "SeatManager.h"
 #include "ReservationWorker.h"
+#include <pthread.h>
 
 class MainWindow : public QMainWindow
 {
@@ -22,17 +26,19 @@ private slots:
     void handleSeatStateChanged(int seatId, int newState);
     void onBuyClicked();
     void onSimulateExternalBuyer();
+    void simulatePthreadBuyers();
 
 private:
     QWidget *central;
     QGridLayout *grid;
     QPushButton *btnBuy;
     QPushButton *btnSimulate;
+    QPushButton *btnPthreadSim;
     QLabel *lblSelected;
     QMap<int, SeatButton*> m_buttons;
     SeatManager *m_manager;
     int m_selectedSeat;
-    int m_uiOwnerId; // id del "usuario UI", por ejemplo 1
+    int m_uiOwnerId;
     QList<ReservationWorker*> m_workers;
 
     void createSeats(int rows, int cols);
